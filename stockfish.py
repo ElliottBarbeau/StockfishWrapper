@@ -8,6 +8,7 @@ import uvicorn
 import chess
 import chess.engine
 import asyncio
+import traceback
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
@@ -80,7 +81,10 @@ async def evaluate_post(request: Request, data: EvalRequest):
         )
 
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        print("----- ENGINE ERROR START -----")
+        traceback.print_exc()
+        print("----- ENGINE ERROR END -----")
+        return JSONResponse(status_code=500, content={"error": str(e), "type": str(type(e))})
 
     # Format output
     results = []
@@ -113,3 +117,4 @@ def root():
 
 if __name__ == "__main__":
     uvicorn.run("stockfish:app", host="0.0.0.0", port=8000)
+
