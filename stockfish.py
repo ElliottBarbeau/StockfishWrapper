@@ -1,42 +1,52 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Header
+import os
 import chess
 import chess.engine
 
 app = FastAPI()
 
-STOCKFISH_PATH = "/usr/bin/stockfish"  # default on Ubuntu
+STOCKFISH_PATH = "/usr/bin/stockfish"
+SECRET = os.getenv("STOCKFISH_SECRET")
+
 engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
 
 
 @app.get("/eval")
-async def evaluate(fen: str, lines: int = 3, depth: int = 20):
-    """
-    Evaluate a chess position using local Stockfish.
-    Returns multipv best lines in UCI and SAN.
-    """
+async def evaluate(
+    fen: str,
+    lines: int = 3,
+    depth: int = 20,
+    x_api_key: str = Header(None)
+):
+    # Check API key
+    if SECRET is None:
+        raise HTTPException(status_code=500, detail="Server misconfigured: no secret set.")
 
+    if x_api_key != SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Prepare evaluation
     board = chess.Board(fen)
-
     info = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=lines)
 
     results = []
 
     for pv in info:
-        # UCI moves
         uci_moves = [m.uci() for m in pv["pv"]]
 
-        # SAN moves (human readable)
+        temp = board.copy()
         san_moves = []
-        temp_board = board.copy()
         for move in pv["pv"]:
-            san_moves.append(temp_board.san(move))
-            temp_board.push(move)
+            san_moves.append(temp.san(move))
+            temp.push(move)
+
+        score = pv["score"].white()
 
         results.append({
-            "score_cp": pv.get("score").white().score(mate_score=100000),
-            "mate": pv.get("score").white().mate(),
+            "score_cp": score.score(mate_score=100000),
+            "mate": score.mate(),
             "pv_uci": uci_moves,
-            "pv_san": san_moves,
+            "pv_san": san_moves
         })
 
     return {
