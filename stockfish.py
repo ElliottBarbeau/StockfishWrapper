@@ -1,32 +1,33 @@
-from fastapi import FastAPI, HTTPException, Header
-import os
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import PlainTextResponse
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import chess
 import chess.engine
 
 app = FastAPI()
 
-STOCKFISH_PATH = "/usr/bin/stockfish"
-SECRET = os.getenv("STOCKFISH_SECRET")
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
 
+@app.exception_handler(RateLimitExceeded)
+def rate_limit_handler(request, exc):
+    return PlainTextResponse("Rate limit exceeded", status_code=429)
+
+
+STOCKFISH_PATH = "/usr/bin/stockfish"
 engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
 
 
 @app.get("/eval")
-async def evaluate(
-    fen: str,
-    lines: int = 3,
-    depth: int = 20,
-    x_api_key: str = Header(None)
-):
-    # Check API key
-    if SECRET is None:
-        raise HTTPException(status_code=500, detail="Server misconfigured: no secret set.")
+@limiter.limit("20/minute")
+async def evaluate(fen: str, lines: int = 3, depth: int = 20):
+    try:
+        board = chess.Board(fen)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid FEN")
 
-    if x_api_key != SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    # Prepare evaluation
-    board = chess.Board(fen)
     info = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=lines)
 
     results = []
@@ -34,24 +35,25 @@ async def evaluate(
     for pv in info:
         uci_moves = [m.uci() for m in pv["pv"]]
 
-        temp = board.copy()
+        # Convert UCI → SAN
         san_moves = []
+        tmp = board.copy()
         for move in pv["pv"]:
-            san_moves.append(temp.san(move))
-            temp.push(move)
+            san_moves.append(tmp.san(move))
+            tmp.push(move)
 
         score = pv["score"].white()
 
         results.append({
-            "score_cp": score.score(mate_score=100000),
-            "mate": score.mate(),
-            "pv_uci": uci_moves,
-            "pv_san": san_moves
+            "uci": uci_moves,
+            "san": san_moves,
+            "cp": score.score(mate_score=99999),
+            "mate": score.mate()
         })
 
     return {
         "fen": fen,
-        "depth": depth,
         "lines": lines,
+        "depth": depth,
         "results": results
     }
