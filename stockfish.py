@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -19,10 +19,9 @@ def rate_limit_handler(request, exc):
 STOCKFISH_PATH = "/usr/games/stockfish"
 engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
 
-
 @app.get("/eval")
 @limiter.limit("20/minute")
-async def evaluate(fen: str, lines: int = 3, depth: int = 20):
+async def evaluate(request: Request, fen: str, lines: int = 3, depth: int = 20):
     try:
         board = chess.Board(fen)
     except:
@@ -31,11 +30,9 @@ async def evaluate(fen: str, lines: int = 3, depth: int = 20):
     info = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=lines)
 
     results = []
-
     for pv in info:
         uci_moves = [m.uci() for m in pv["pv"]]
 
-        # Convert UCI → SAN
         san_moves = []
         tmp = board.copy()
         for move in pv["pv"]:
@@ -57,4 +54,3 @@ async def evaluate(fen: str, lines: int = 3, depth: int = 20):
         "depth": depth,
         "results": results
     }
-
