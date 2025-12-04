@@ -17,17 +17,28 @@ def rate_limit_handler(request, exc):
 
 
 STOCKFISH_PATH = "/usr/games/stockfish"
-engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+engine = chess.engine.SimpleEngine.popen_uci(
+    "/usr/games/stockfish",
+    options={
+        "Threads": 1,
+        "Hash": 32
+    }
+)
 
 @app.get("/eval")
 @limiter.limit("20/minute")
-async def evaluate(request: Request, fen: str, lines: int = 3, depth: int = 20):
-    try:
-        board = chess.Board(fen)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid FEN")
+async def evaluate(request: Request, fen: str, lines: int = 1, depth: int = 18):
+    board = chess.Board(fen)
 
-    info = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=lines)
+    # safety: avoid OOM
+    safe_lines = min(lines, 2)
+    safe_depth = min(depth, 18)
+
+    info = engine.analyse(
+        board,
+        chess.engine.Limit(depth=safe_depth),
+        multipv=safe_lines
+    )
 
     results = []
     for pv in info:
@@ -54,6 +65,7 @@ async def evaluate(request: Request, fen: str, lines: int = 3, depth: int = 20):
         "depth": depth,
         "results": results
     }
+
 
 
 
