@@ -16,7 +16,7 @@ def rate_limit_handler(request, exc):
     return PlainTextResponse("Rate limit exceeded", status_code=429)
 
 
-STOCKFISH_PATH = "/root/bots/StockfishWrapper/Stockfish/src/stockfish"
+STOCKFISH_PATH = "/usr/games/stockfish"
 engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
 
 @app.get("/eval")
@@ -54,5 +54,6 @@ async def evaluate(request: Request, fen: str, lines: int = 3, depth: int = 20):
         "depth": depth,
         "results": results
     }
+
 
 
