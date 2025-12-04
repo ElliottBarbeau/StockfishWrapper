@@ -1,71 +1,102 @@
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Request
+from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
+from fastapi.responses import JSONResponse
+
 import chess
 import chess.engine
+import uvicorn
 
-app = FastAPI()
+import subprocess
 
 limiter = Limiter(key_func=get_remote_address)
+
+app = FastAPI()
 app.state.limiter = limiter
 
-@app.exception_handler(RateLimitExceeded)
-def rate_limit_handler(request, exc):
-    return PlainTextResponse("Rate limit exceeded", status_code=429)
 
+ENGINE_PATH = "/usr/games/stockfish"
 
-STOCKFISH_PATH = "/usr/games/stockfish"
-engine = chess.engine.SimpleEngine.popen_uci(
-    "/usr/games/stockfish",
-    options={
-        "Threads": 1,
-        "Hash": 32
-    }
-)
-
-@app.get("/eval")
-@limiter.limit("20/minute")
-async def evaluate(request: Request, fen: str, lines: int = 1, depth: int = 18):
-    board = chess.Board(fen)
-
-    # safety: avoid OOM
-    safe_lines = min(lines, 2)
-    safe_depth = min(depth, 18)
-
-    info = engine.analyse(
-        board,
-        chess.engine.Limit(depth=safe_depth),
-        multipv=safe_lines
+def load_engine():
+    """Load Stockfish safely with 1 thread + small memory footprint."""
+    return chess.engine.SimpleEngine.popen_uci(
+        ENGINE_PATH,
+        options={
+            "Threads": 1,
+            "Hash": 32
+        }
     )
 
-    results = []
-    for pv in info:
-        uci_moves = [m.uci() for m in pv["pv"]]
+engine = load_engine()  # initial engine load
 
-        san_moves = []
-        tmp = board.copy()
-        for move in pv["pv"]:
-            san_moves.append(tmp.san(move))
-            tmp.push(move)
+class EvalRequest(BaseModel):
+    fen: str
+    lines: int = 1
+    depth: int = 16
 
-        score = pv["score"].white()
+def restart_engine():
+    global engine
+    try:
+        engine.quit()
+    except:
+        pass
+    engine = load_engine()
 
-        results.append({
-            "uci": uci_moves,
-            "san": san_moves,
-            "cp": score.score(mate_score=99999),
-            "mate": score.mate()
+@app.post("/eval")
+@limiter.limit("20/minute")
+async def evaluate(request: Request, data: EvalRequest):
+
+    fen = data.fen
+    depth = min(data.depth, 18)   # prevent memory spikes
+    lines = min(data.lines, 2)    # multipv=3 causes instability on small VMs
+
+    board = chess.Board(fen)
+
+    try:
+        info = engine.analyse(
+            board,
+            chess.engine.Limit(depth=depth),
+            multipv=lines
+        )
+    except chess.engine.EngineTerminatedError:
+        # Stockfish crashed — automatically restart safely
+        restart_engine()
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Engine crashed and was restarted."}
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
+    lines_out = []
+    for entry in info:
+        move_list = [m.uci() for m in entry.get("pv", [])]
+
+        lines_out.append({
+            "score_cp": entry["score"].white().score(mate_score=100000)
+                if entry["score"].is_cp()
+                else None,
+            "score_mate": entry["score"].white().mate()
+                if entry["score"].is_mate()
+                else None,
+            "pv_uci": move_list,
+            "best_move_uci": move_list[0] if move_list else None
         })
 
     return {
         "fen": fen,
-        "lines": lines,
         "depth": depth,
-        "results": results
+        "lines": lines,
+        "results": lines_out
     }
 
+@app.get("/")
+def root():
+    return {"status": "Stockfish Wrapper Online"}
 
-
-
+if __name__ == "__main__":
+    uvicorn.run("stockfish:app", host="0.0.0.0", port=8000)
