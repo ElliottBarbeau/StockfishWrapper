@@ -9,6 +9,13 @@ import chess.engine
 import asyncio
 import traceback
 
+try:
+    e = chess.engine.SimpleEngine.popen_uci("/usr/games/stockfish")
+    print("FASTAPI PRE-TEST OK:", e.analyse(chess.Board(), chess.engine.Limit(depth=10)))
+    e.quit()
+except Exception as exc:
+    print("FASTAPI PRE-TEST FAILED:", exc)
+
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
 app.state.limiter = limiter
@@ -110,4 +117,5 @@ def root():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
