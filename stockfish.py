@@ -1,5 +1,4 @@
 import subprocess
-import chess
 import time
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,62 +14,91 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def run_stockfish_command(commands, timeout=2.0):
+def run_engine(commands, timeout=3.0):
     p = subprocess.Popen(
         [STOCKFISH_PATH],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True
+        text=True,
+        bufsize=1
     )
 
-    for cmd in commands:
+    def send(cmd):
         p.stdin.write(cmd + "\n")
-    p.stdin.flush()
+        p.stdin.flush()
 
-    result_lines = []
+    lines = []
+
+    send("uci")
     start = time.time()
+    while True:
+        line = p.stdout.readline().strip()
+        if "uciok" in line:
+            break
+        if time.time() - start > timeout:
+            p.kill()
+            return None
+        if line:
+            lines.append(line)
 
+    send("isready")
+    start = time.time()
+    while True:
+        line = p.stdout.readline().strip()
+        if "readyok" in line:
+            break
+        if time.time() - start > timeout:
+            p.kill()
+            return None
+
+    for c in commands:
+        send(c)
+
+    start = time.time()
+    output = []
     while True:
         line = p.stdout.readline().strip()
         if line:
-            result_lines.append(line)
+            output.append(line)
         if "bestmove" in line:
             break
         if time.time() - start > timeout:
             break
 
     p.kill()
-    return result_lines
+    return output
 
 
 def analyse_fen(fen, depth, lines):
-    commands = [
-        "uci",
-        "setoption name MultiPV value " + str(lines),
-        "position fen " + fen,
-        "go depth " + str(depth)
+    cmds = [
+        f"setoption name MultiPV value {lines}",
+        f"position fen {fen}",
+        f"go depth {depth}"
     ]
 
-    output = run_stockfish_command(commands, timeout=5)
+    output = run_engine(cmds, timeout=6.0)
+    if not output:
+        return {"error": "Engine did not respond"}
 
-    pvs = []
+    results = []
     for line in output:
-        if " multipv " in line and " pv " in line:
+        if "multipv" in line and " pv " in line:
             parts = line.split(" pv ")
             moves = parts[1].split()
+
             score = None
             if " score cp " in line:
                 score = int(line.split(" score cp ")[1].split()[0])
             elif " score mate " in line:
                 score = "mate " + line.split(" score mate ")[1].split()[0]
 
-            pvs.append({
+            results.append({
                 "moves": moves,
                 "score": score
             })
 
-    return pvs
+    return {"pv": results}
 
 
 @app.post("/eval")
@@ -80,14 +108,7 @@ async def eval_post(request: Request):
     depth = int(data.get("depth", 14))
     lines = int(data.get("lines", 3))
 
-    result = analyse_fen(fen, depth, lines)
-
-    return {
-        "fen": fen,
-        "depth": depth,
-        "lines": lines,
-        "results": result
-    }
+    return analyse_fen(fen, depth, lines)
 
 
 if __name__ == "__main__":
