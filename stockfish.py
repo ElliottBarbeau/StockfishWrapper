@@ -1,8 +1,8 @@
-import chess
-import chess.engine
 from fastapi import FastAPI
 from pydantic import BaseModel
 import uvicorn
+import chess
+import chess.engine
 
 STOCKFISH_PATH = "/usr/games/stockfish"
 
@@ -14,9 +14,9 @@ class EvalRequest(BaseModel):
     lines: int = 3
 
 @app.post("/eval")
-async def eval_post(req: EvalRequest):
-
+async def eval_position(req: EvalRequest):
     try:
+        # Start Stockfish fresh for each request
         engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
 
         board = chess.Board(req.fen)
@@ -31,22 +31,16 @@ async def eval_post(req: EvalRequest):
 
         results = []
         for pv in info:
-            moves_san = []
-            temp_board = board.copy()
+            pv_moves = [move.uci() for move in pv["pv"]]
 
-            for move in pv["pv"]:
-                moves_san.append(temp_board.san(move))
-                temp_board.push(move)
-
-            score = None
             if pv["score"].is_mate():
                 score = f"mate {pv['score'].mate()}"
             else:
                 score = pv["score"].pov(board.turn).score()
 
             results.append({
-                "score": score,
-                "pv_san": moves_san
+                "pv": pv_moves,
+                "score": score
             })
 
         return {"results": results}
