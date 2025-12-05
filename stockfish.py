@@ -15,13 +15,13 @@ class EvalRequest(BaseModel):
 
 @app.post("/eval")
 async def eval_position(req: EvalRequest):
+    board = chess.Board(req.fen)
+
     try:
-        # Start Stockfish fresh for each request
+        # Start engine fresh each request
         engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
 
-        board = chess.Board(req.fen)
-
-        info = engine.analyse(
+        info_list = engine.analyse(
             board,
             chess.engine.Limit(depth=req.depth),
             multipv=req.lines
@@ -30,13 +30,17 @@ async def eval_position(req: EvalRequest):
         engine.quit()
 
         results = []
-        for pv in info:
-            pv_moves = [move.uci() for move in pv["pv"]]
 
-            if pv["score"].is_mate():
-                score = f"mate {pv['score'].mate()}"
+        for info in info_list:
+            score_obj = info["score"].pov(board.turn)
+
+            # Score normalization
+            if score_obj.is_mate():
+                score = f"M{score_obj.mate()}"
             else:
-                score = pv["score"].pov(board.turn).score()
+                score = score_obj.score()  # centipawns
+
+            pv_moves = [m.uci() for m in info["pv"]]
 
             results.append({
                 "pv": pv_moves,
@@ -46,7 +50,8 @@ async def eval_position(req: EvalRequest):
         return {"results": results}
 
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Engine failure: {e}"}
+
 
 if __name__ == "__main__":
     uvicorn.run("stockfish:app", host="0.0.0.0", port=8000)
