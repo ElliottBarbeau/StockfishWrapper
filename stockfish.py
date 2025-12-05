@@ -1,9 +1,6 @@
-import os
-os.environ["PYTHON_CHESS_ENGINE_SYNC"] = "1"
-
+import subprocess
 import chess
-import chess.engine
-import asyncio
+import time
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -18,48 +15,80 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def run_stockfish_once(fen: str, depth: int, lines: int):
-    board = chess.Board(fen)
-    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-    try:
-        return engine.analyse(board, chess.engine.Limit(depth=depth), multipv=lines)
-    finally:
-        engine.quit()
+def run_stockfish_command(commands, timeout=2.0):
+    p = subprocess.Popen(
+        [STOCKFISH_PATH],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
 
-def format_result(info_list):
-    out = []
-    for pv in info_list:
-        moves = [m.uci() for m in pv["pv"]]
-        score = pv["score"].pov(chess.WHITE)
-        out.append({
-            "best_move": moves[0] if moves else None,
-            "pv_uci": moves,
-            "score_cp": score.score(mate_score=100000),
-            "mate": score.mate(),
-        })
-    return out
+    for cmd in commands:
+        p.stdin.write(cmd + "\n")
+    p.stdin.flush()
+
+    result_lines = []
+    start = time.time()
+
+    while True:
+        line = p.stdout.readline().strip()
+        if line:
+            result_lines.append(line)
+        if "bestmove" in line:
+            break
+        if time.time() - start > timeout:
+            break
+
+    p.kill()
+    return result_lines
+
+
+def analyse_fen(fen, depth, lines):
+    commands = [
+        "uci",
+        "setoption name MultiPV value " + str(lines),
+        "position fen " + fen,
+        "go depth " + str(depth)
+    ]
+
+    output = run_stockfish_command(commands, timeout=5)
+
+    pvs = []
+    for line in output:
+        if " multipv " in line and " pv " in line:
+            parts = line.split(" pv ")
+            moves = parts[1].split()
+            score = None
+            if " score cp " in line:
+                score = int(line.split(" score cp ")[1].split()[0])
+            elif " score mate " in line:
+                score = "mate " + line.split(" score mate ")[1].split()[0]
+
+            pvs.append({
+                "moves": moves,
+                "score": score
+            })
+
+    return pvs
+
 
 @app.post("/eval")
 async def eval_post(request: Request):
     data = await request.json()
     fen = data["fen"]
-    depth = data.get("depth", 14)
-    lines = data.get("lines", 3)
+    depth = int(data.get("depth", 14))
+    lines = int(data.get("lines", 3))
 
-    loop = asyncio.get_event_loop()
-    try:
-        result = await loop.run_in_executor(
-            None, lambda: run_stockfish_once(fen, depth, lines)
-        )
-    except Exception as exc:
-        return {"error": str(exc)}
+    result = analyse_fen(fen, depth, lines)
 
     return {
         "fen": fen,
         "depth": depth,
         "lines": lines,
-        "results": format_result(result),
+        "results": result
     }
+
 
 if __name__ == "__main__":
     import uvicorn
