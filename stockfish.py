@@ -1,3 +1,6 @@
+import os
+os.environ["PYTHON_CHESS_ENGINE_SYNC"] = "1"
+
 import chess
 import chess.engine
 import asyncio
@@ -19,25 +22,25 @@ def run_stockfish_once(fen: str, depth: int, lines: int):
     board = chess.Board(fen)
     engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
     try:
-        result = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=lines)
-        return result
+        return engine.analyse(board, chess.engine.Limit(depth=depth), multipv=lines)
     finally:
         engine.quit()
 
 def format_result(info_list):
-    formatted = []
+    out = []
     for pv in info_list:
-        moves_uci = [m.uci() for m in pv["pv"]]
-        formatted.append({
-            "score_cp": pv["score"].pov(chess.WHITE).score(mate_score=100000),
-            "mate": pv["score"].pov(chess.WHITE).mate(),
-            "pv_uci": moves_uci,
-            "best_move": moves_uci[0] if moves_uci else None
+        moves = [m.uci() for m in pv["pv"]]
+        score = pv["score"].pov(chess.WHITE)
+        out.append({
+            "best_move": moves[0] if moves else None,
+            "pv_uci": moves,
+            "score_cp": score.score(mate_score=100000),
+            "mate": score.mate(),
         })
-    return formatted
+    return out
 
 @app.post("/eval")
-async def evaluate_post(request: Request):
+async def eval_post(request: Request):
     data = await request.json()
     fen = data["fen"]
     depth = data.get("depth", 14)
@@ -45,9 +48,8 @@ async def evaluate_post(request: Request):
 
     loop = asyncio.get_event_loop()
     try:
-        raw = await loop.run_in_executor(
-            None,
-            lambda: run_stockfish_once(fen, depth, lines)
+        result = await loop.run_in_executor(
+            None, lambda: run_stockfish_once(fen, depth, lines)
         )
     except Exception as exc:
         return {"error": str(exc)}
@@ -56,7 +58,7 @@ async def evaluate_post(request: Request):
         "fen": fen,
         "depth": depth,
         "lines": lines,
-        "results": format_result(raw)
+        "results": format_result(result),
     }
 
 if __name__ == "__main__":
