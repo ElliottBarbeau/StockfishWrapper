@@ -35,14 +35,18 @@ def restart_engine():
 
 async def run_analyse(board, depth, lines):
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None,
-        lambda: engine.analyse(
-            board,
-            chess.engine.Limit(depth=depth),
-            multipv=lines
-        )
-    )
+    def _analyse():
+        try:
+            return engine.analyse(
+                board,
+                chess.engine.Limit(depth=depth),
+                multipv=lines
+            )
+        except Exception as e:
+            print("ANALYSE ERROR:")
+            traceback.print_exc()
+            raise e
+    return await loop.run_in_executor(None, _analyse)
 
 class EvalRequest(BaseModel):
     fen: str
@@ -61,7 +65,7 @@ async def evaluate_post(request: Request, data: EvalRequest):
         info = await run_analyse(board, depth, lines)
     except chess.engine.EngineTerminatedError:
         restart_engine()
-        return JSONResponse(status_code=500, content={"error": "Stockfish crashed and was automatically restarted."})
+        return JSONResponse(status_code=500, content={"error": "Stockfish crashed and was restarted."})
     except Exception as e:
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e), "type": str(type(e))})
@@ -89,4 +93,4 @@ def root():
     return {"status": "Stockfish API is running"}
 
 if __name__ == "__main__":
-    uvicorn.run("stockfish:app", host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
