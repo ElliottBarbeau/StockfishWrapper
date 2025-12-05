@@ -1,121 +1,64 @@
-from fastapi import FastAPI, Request
-from pydantic import BaseModel
-from slowapi import Limiter
-from slowapi.util import get_remote_address
-from fastapi.responses import JSONResponse
-import uvicorn
 import chess
 import chess.engine
 import asyncio
-import traceback
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 
-try:
-    e = chess.engine.SimpleEngine.popen_uci("/usr/games/stockfish")
-    print("FASTAPI PRE-TEST OK:", e.analyse(chess.Board(), chess.engine.Limit(depth=10)))
-    e.quit()
-except Exception as exc:
-    print("FASTAPI PRE-TEST FAILED:", exc)
+STOCKFISH_PATH = "/usr/games/stockfish"
 
-limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
-app.state.limiter = limiter
 
-ENGINE_PATH = "/usr/games/stockfish"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def load_engine():
-    engine = chess.engine.SimpleEngine.popen_uci(ENGINE_PATH)
+def run_stockfish_once(fen: str, depth: int, lines: int):
+    board = chess.Board(fen)
+    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
     try:
-        engine.configure({"Threads": 1, "Hash": 32})
-    except:
-        pass
-    return engine
-
-engine = load_engine()
-
-def restart_engine():
-    global engine
-    try:
+        result = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=lines)
+        return result
+    finally:
         engine.quit()
-    except:
-        pass
-    engine = load_engine()
 
-async def run_analyse(board, depth, lines):
-    loop = asyncio.get_running_loop()
-    def _analyse():
-        try:
-            return engine.analyse(
-                board,
-                chess.engine.Limit(depth=depth),
-                multipv=lines
-            )
-        except Exception as e:
-            print("ANALYSE ERROR:")
-            traceback.print_exc()
-            raise e
-    return await loop.run_in_executor(None, _analyse)
-
-class EvalRequest(BaseModel):
-    fen: str
-    lines: int = 1
-    depth: int = 14
+def format_result(info_list):
+    formatted = []
+    for pv in info_list:
+        moves_uci = [m.uci() for m in pv["pv"]]
+        formatted.append({
+            "score_cp": pv["score"].pov(chess.WHITE).score(mate_score=100000),
+            "mate": pv["score"].pov(chess.WHITE).mate(),
+            "pv_uci": moves_uci,
+            "best_move": moves_uci[0] if moves_uci else None
+        })
+    return formatted
 
 @app.post("/eval")
-@limiter.limit("30/minute")
-async def evaluate_post(request: Request, data: EvalRequest):
-    fen = data.fen
-    depth = min(data.depth, 18)
-    lines = min(data.lines, 3)
+async def evaluate_post(request: Request):
+    data = await request.json()
+    fen = data["fen"]
+    depth = data.get("depth", 14)
+    lines = data.get("lines", 3)
 
-    print("\n=== NEW REQUEST ===")
-    print("FEN:", fen)
-    print("Depth:", depth, "Lines:", lines)
-
+    loop = asyncio.get_event_loop()
     try:
-        board = chess.Board(fen)
-    except Exception as e:
-        print("FEN PARSE ERROR:")
-        traceback.print_exc()
-        return JSONResponse(status_code=400, content={"error": "Invalid FEN", "details": str(e)})
+        raw = await loop.run_in_executor(
+            None,
+            lambda: run_stockfish_once(fen, depth, lines)
+        )
+    except Exception as exc:
+        return {"error": str(exc)}
 
-    try:
-        info = await run_analyse(board, depth, lines)
-    except chess.engine.EngineTerminatedError:
-        print("\nENGINE TERMINATED ERROR — Restarting engine.\n")
-        traceback.print_exc()
-        restart_engine()
-        return JSONResponse(status_code=500, content={"error": "Stockfish crashed (EngineTerminatedError). Restarted."})
-    except Exception as e:
-        print("\nUNEXPECTED ANALYSIS ERROR:")
-        traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": "Unexpected error", "details": str(e)})
-
-    print("Analyse completed without crash.")
-
-    results = []
-    for entry in info:
-        pv = [m.uci() for m in entry.get("pv", [])]
-        score = entry["score"]
-
-        results.append({
-            "best_move_uci": pv[0] if pv else None,
-            "pv_uci": pv,
-            "score_cp": score.white().score(mate_score=100000) if score.is_cp() else None,
-            "score_mate": score.white().mate() if score.is_mate() else None
-        })
-
-    return {"fen": fen, "depth": depth, "lines": lines, "results": results}
-
-@app.get("/eval")
-async def evaluate_get(request: Request, fen: str, lines: int = 1, depth: int = 12):
-    data = EvalRequest(fen=fen, lines=lines, depth=depth)
-    return await evaluate_post(request, data)
-
-@app.get("/")
-def root():
-    return {"status": "Stockfish API is running"}
+    return {
+        "fen": fen,
+        "depth": depth,
+        "lines": lines,
+        "results": format_result(raw)
+    }
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
+    import uvicorn
+    uvicorn.run("stockfish:app", host="0.0.0.0", port=8000)
