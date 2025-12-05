@@ -59,21 +59,37 @@ async def evaluate_post(request: Request, data: EvalRequest):
     fen = data.fen
     depth = min(data.depth, 18)
     lines = min(data.lines, 3)
-    board = chess.Board(fen)
+
+    print("\n=== NEW REQUEST ===")
+    print("FEN:", fen)
+    print("Depth:", depth, "Lines:", lines)
+
+    try:
+        board = chess.Board(fen)
+    except Exception as e:
+        print("FEN PARSE ERROR:")
+        traceback.print_exc()
+        return JSONResponse(status_code=400, content={"error": "Invalid FEN", "details": str(e)})
 
     try:
         info = await run_analyse(board, depth, lines)
     except chess.engine.EngineTerminatedError:
-        restart_engine()
-        return JSONResponse(status_code=500, content={"error": "Stockfish crashed and was restarted."})
-    except Exception as e:
+        print("\nENGINE TERMINATED ERROR — Restarting engine.\n")
         traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e), "type": str(type(e))})
+        restart_engine()
+        return JSONResponse(status_code=500, content={"error": "Stockfish crashed (EngineTerminatedError). Restarted."})
+    except Exception as e:
+        print("\nUNEXPECTED ANALYSIS ERROR:")
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"error": "Unexpected error", "details": str(e)})
+
+    print("Analyse completed without crash.")
 
     results = []
     for entry in info:
         pv = [m.uci() for m in entry.get("pv", [])]
         score = entry["score"]
+
         results.append({
             "best_move_uci": pv[0] if pv else None,
             "pv_uci": pv,
@@ -94,3 +110,4 @@ def root():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
