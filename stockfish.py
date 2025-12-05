@@ -1,7 +1,8 @@
-import subprocess
-import time
+import chess
+import chess.engine
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+import time
 
 STOCKFISH_PATH = "/usr/games/stockfish"
 
@@ -14,98 +15,54 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def run_engine(commands, timeout=3.0):
-    p = subprocess.Popen(
-        [STOCKFISH_PATH],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1
-    )
+def analyse_fen(fen: str, depth: int, lines: int):
+    try:
+        # Create a NEW engine for every request
+        engine = chess.engine.SimpleEngine.popen_uci(
+            STOCKFISH_PATH,
+            use_pty=True  # CRITICAL FOR NEW STOCKFISH BUILDS
+        )
+    except Exception as e:
+        return {"error": f"Engine failed to start: {e}"}
 
-    def send(cmd):
-        p.stdin.write(cmd + "\n")
-        p.stdin.flush()
+    board = chess.Board(fen)
 
-    lines = []
+    try:
+        analysis = engine.analyse(
+            board,
+            chess.engine.Limit(depth=depth),
+            multipv=lines
+        )
+    except Exception as e:
+        engine.quit()
+        return {"error": f"Engine crashed: {e}"}
 
-    send("uci")
-    start = time.time()
-    while True:
-        line = p.stdout.readline().strip()
-        if "uciok" in line:
-            break
-        if time.time() - start > timeout:
-            p.kill()
-            return None
-        if line:
-            lines.append(line)
+    engine.quit()
 
-    send("isready")
-    start = time.time()
-    while True:
-        line = p.stdout.readline().strip()
-        if "readyok" in line:
-            break
-        if time.time() - start > timeout:
-            p.kill()
-            return None
-
-    for c in commands:
-        send(c)
-
-    start = time.time()
-    output = []
-    while True:
-        line = p.stdout.readline().strip()
-        if line:
-            output.append(line)
-        if "bestmove" in line:
-            break
-        if time.time() - start > timeout:
-            break
-
-    p.kill()
-    return output
-
-
-def analyse_fen(fen, depth, lines):
-    cmds = [
-        f"setoption name MultiPV value {lines}",
-        f"position fen {fen}",
-        f"go depth {depth}"
-    ]
-
-    output = run_engine(cmds, timeout=6.0)
-    if not output:
-        return {"error": "Engine did not respond"}
-
+    # Parse PV results
     results = []
-    for line in output:
-        if "multipv" in line and " pv " in line:
-            parts = line.split(" pv ")
-            moves = parts[1].split()
+    for entry in analysis:
+        score = None
+        if entry["score"].cp is not None:
+            score = entry["score"].cp
+        elif entry["score"].mate is not None:
+            score = f"mate {entry['score'].mate}"
 
-            score = None
-            if " score cp " in line:
-                score = int(line.split(" score cp ")[1].split()[0])
-            elif " score mate " in line:
-                score = "mate " + line.split(" score mate ")[1].split()[0]
+        pv_moves = [m.uci() for m in entry.get("pv", [])]
 
-            results.append({
-                "moves": moves,
-                "score": score
-            })
+        results.append({
+            "score": score,
+            "pv": pv_moves
+        })
 
-    return {"pv": results}
+    return {"results": results}
 
 
 @app.post("/eval")
 async def eval_post(request: Request):
     data = await request.json()
     fen = data["fen"]
-    depth = int(data.get("depth", 14))
+    depth = int(data.get("depth", 15))
     lines = int(data.get("lines", 3))
 
     return analyse_fen(fen, depth, lines)
